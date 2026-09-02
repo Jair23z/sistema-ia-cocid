@@ -1,5 +1,7 @@
 import re
+from hashlib import sha256
 from typing import Annotated, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -26,6 +28,134 @@ class Paper(BaseModel):
     is_open_access: bool | None
     open_access_status: str | None
     abstract: str | None
+
+
+class DocumentUploadResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+    )
+
+    document_id: UUID
+    filename: Annotated[str, Field(min_length=1, max_length=120)]
+    size_bytes: Annotated[int, Field(gt=0)]
+    status: Literal["uploaded"]
+
+
+class ExtractedPage(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    page_number: Annotated[int, Field(ge=1)]
+    text: str
+    character_count: Annotated[int, Field(ge=0)]
+    word_count: Annotated[int, Field(ge=0)]
+
+    @model_validator(mode="after")
+    def validate_page_counts(self) -> Self:
+        if self.character_count != len(self.text):
+            raise ValueError("Page character count does not match its text.")
+        if self.word_count != len(re.findall(r"\S+", self.text)):
+            raise ValueError("Page word count does not match its text.")
+        return self
+
+
+class ExtractedDocument(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    document_id: UUID
+    page_count: Annotated[int, Field(ge=1)]
+    character_count: Annotated[int, Field(ge=0)]
+    word_count: Annotated[int, Field(ge=0)]
+    pages: list[ExtractedPage] = Field(min_length=1)
+    requires_ocr: bool
+    status: Literal["extracted"]
+
+    @model_validator(mode="after")
+    def validate_document_counts(self) -> Self:
+        if self.page_count != len(self.pages):
+            raise ValueError("Document page count does not match its pages.")
+        if [page.page_number for page in self.pages] != list(
+            range(1, self.page_count + 1)
+        ):
+            raise ValueError("Document pages must be sequential and start at one.")
+        if self.character_count != sum(
+            page.character_count for page in self.pages
+        ):
+            raise ValueError("Document character count does not match its pages.")
+        if self.word_count != sum(page.word_count for page in self.pages):
+            raise ValueError("Document word count does not match its pages.")
+        return self
+
+
+class DocumentChunk(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    document_id: UUID
+    chunk_index: Annotated[int, Field(ge=1)]
+    page_start: Annotated[int, Field(ge=1)]
+    page_end: Annotated[int, Field(ge=1)]
+    text: Annotated[str, Field(min_length=1)]
+    character_count: Annotated[int, Field(gt=0)]
+    word_count: Annotated[int, Field(gt=0)]
+    text_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @model_validator(mode="after")
+    def validate_chunk_content(self) -> Self:
+        if self.page_end < self.page_start:
+            raise ValueError("Chunk page range is invalid.")
+        if self.character_count != len(self.text):
+            raise ValueError("Chunk character count does not match its text.")
+        if self.word_count != len(re.findall(r"\S+", self.text)):
+            raise ValueError("Chunk word count does not match its text.")
+        expected_hash = sha256(self.text.encode("utf-8")).hexdigest()
+        if self.text_hash != expected_hash:
+            raise ValueError("Chunk hash does not match its text.")
+        return self
+
+
+class ChunkedDocument(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    document_id: UUID
+    chunk_count: Annotated[int, Field(ge=0)]
+    total_word_count: Annotated[int, Field(ge=0)]
+    chunks: list[DocumentChunk]
+    requires_ocr: bool
+    status: Literal["chunked", "insufficient_text"]
+
+    @model_validator(mode="after")
+    def validate_chunking_state(self) -> Self:
+        if self.chunk_count != len(self.chunks):
+            raise ValueError("Chunk count does not match the chunk list.")
+        if self.status == "insufficient_text":
+            if self.chunk_count != 0 or self.chunks:
+                raise ValueError("Insufficient text cannot contain chunks.")
+            return self
+
+        if not self.chunks:
+            raise ValueError("A chunked document must contain at least one chunk.")
+        if [chunk.chunk_index for chunk in self.chunks] != list(
+            range(1, self.chunk_count + 1)
+        ):
+            raise ValueError("Chunk indices must be consecutive and start at one.")
+        if any(chunk.document_id != self.document_id for chunk in self.chunks):
+            raise ValueError("Every chunk must belong to the same document.")
+        if self.total_word_count > sum(chunk.word_count for chunk in self.chunks):
+            raise ValueError("Chunk words cannot omit source document words.")
+        return self
 
 
 NonEmptyFinding = Annotated[str, Field(min_length=1, max_length=1000)]

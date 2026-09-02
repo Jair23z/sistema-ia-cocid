@@ -4,11 +4,12 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
-import { BatchAnalysisResults } from "@/app/components/batch-analysis-results";
+import { BatchComparisonResults } from "@/app/components/batch-comparison-results";
+import { DocumentUpload } from "@/app/components/document-upload";
 import {
-  requestBatchScientificAnalysis,
-  type BatchAnalysisResponse,
-} from "@/app/lib/batch-analysis";
+  requestBatchComparison,
+  type BatchComparisonResponse,
+} from "@/app/lib/batch-comparison";
 import {
   MAX_BATCH_SELECTION,
   canAnalyzeSelection,
@@ -47,68 +48,97 @@ export default function Home() {
     useState<PublicationTypeFilter>("");
   const [openAccess, setOpenAccess] = useState<OpenAccessFilter>("");
   const [selectedPaperIds, setSelectedPaperIds] = useState<string[]>([]);
-  const [batchAnalysis, setBatchAnalysis] =
-    useState<BatchAnalysisResponse | null>(null);
-  const [isBatchAnalyzing, setIsBatchAnalyzing] = useState(false);
-  const [batchError, setBatchError] = useState<string | null>(null);
+  const [batchComparison, setBatchComparison] =
+    useState<BatchComparisonResponse | null>(null);
+  const [isBatchComparing, setIsBatchComparing] = useState(false);
+  const [batchComparisonError, setBatchComparisonError] = useState<
+    string | null
+  >(null);
+  const [hasMounted, setHasMounted] = useState(false);
   const requestInProgress = useRef(false);
   const batchRequestInProgress = useRef(false);
 
   useEffect(() => {
+    let restoredSearch:
+      | {
+          query: string;
+          fromYear: string;
+          toYear: string;
+          publicationType: PublicationTypeFilter;
+          openAccess: OpenAccessFilter;
+          papers: Paper[];
+        }
+      | undefined;
+
     try {
       const savedSearch = sessionStorage.getItem(PAPER_SEARCH_STORAGE_KEY);
 
-      if (!savedSearch) {
-        return;
+      if (savedSearch) {
+        const parsedSearch: unknown = JSON.parse(savedSearch);
+
+        if (typeof parsedSearch !== "object" || parsedSearch === null) {
+          throw new Error("La búsqueda guardada no es válida.");
+        }
+
+        const saved = parsedSearch as Record<string, unknown>;
+        const savedPublicationType = saved.publicationType;
+        const savedOpenAccess = saved.openAccess;
+        const validPublicationType =
+          savedPublicationType === "" ||
+          (typeof savedPublicationType === "string" &&
+            PUBLICATION_TYPE_OPTIONS.some(
+              (option) => option.value === savedPublicationType,
+            ));
+        const validOpenAccess =
+          savedOpenAccess === "" ||
+          savedOpenAccess === "true" ||
+          savedOpenAccess === "false";
+
+        if (
+          typeof saved.query !== "string" ||
+          typeof saved.fromYear !== "string" ||
+          typeof saved.toYear !== "string" ||
+          !validPublicationType ||
+          !validOpenAccess ||
+          !Array.isArray(saved.papers) ||
+          !saved.papers.every(isPaper)
+        ) {
+          throw new Error("La búsqueda guardada está incompleta.");
+        }
+
+        restoredSearch = {
+          query: saved.query,
+          fromYear: saved.fromYear,
+          toYear: saved.toYear,
+          publicationType: savedPublicationType as PublicationTypeFilter,
+          openAccess: savedOpenAccess as OpenAccessFilter,
+          papers: saved.papers,
+        };
       }
-
-      const parsedSearch: unknown = JSON.parse(savedSearch);
-
-      if (typeof parsedSearch !== "object" || parsedSearch === null) {
-        throw new Error("La búsqueda guardada no es válida.");
-      }
-
-      const saved = parsedSearch as Record<string, unknown>;
-      const savedPublicationType = saved.publicationType;
-      const savedOpenAccess = saved.openAccess;
-      const validPublicationType =
-        savedPublicationType === "" ||
-        (typeof savedPublicationType === "string" &&
-          PUBLICATION_TYPE_OPTIONS.some(
-            (option) => option.value === savedPublicationType,
-          ));
-      const validOpenAccess =
-        savedOpenAccess === "" ||
-        savedOpenAccess === "true" ||
-        savedOpenAccess === "false";
-
-      if (
-        typeof saved.query !== "string" ||
-        typeof saved.fromYear !== "string" ||
-        typeof saved.toYear !== "string" ||
-        !validPublicationType ||
-        !validOpenAccess ||
-        !Array.isArray(saved.papers) ||
-        !saved.papers.every(isPaper)
-      ) {
-        throw new Error("La búsqueda guardada está incompleta.");
-      }
-
-      const restoreTimeout = window.setTimeout(() => {
-        setQuery(saved.query as string);
-        setFromYear(saved.fromYear as string);
-        setToYear(saved.toYear as string);
-        setPublicationType(savedPublicationType as PublicationTypeFilter);
-        setOpenAccess(savedOpenAccess as OpenAccessFilter);
-        setPapers(saved.papers as Paper[]);
-        setHasSearched(true);
-      }, 0);
-
-      return () => window.clearTimeout(restoreTimeout);
     } catch (restoreError) {
       console.warn(restoreError);
-      sessionStorage.removeItem(PAPER_SEARCH_STORAGE_KEY);
+      try {
+        sessionStorage.removeItem(PAPER_SEARCH_STORAGE_KEY);
+      } catch (storageError) {
+        console.warn(storageError);
+      }
     }
+
+    const restoreTimeout = window.setTimeout(() => {
+      if (restoredSearch) {
+        setQuery(restoredSearch.query);
+        setFromYear(restoredSearch.fromYear);
+        setToYear(restoredSearch.toYear);
+        setPublicationType(restoredSearch.publicationType);
+        setOpenAccess(restoredSearch.openAccess);
+        setPapers(restoredSearch.papers);
+        setHasSearched(true);
+      }
+
+      setHasMounted(true);
+    }, 0);
+
+    return () => window.clearTimeout(restoreTimeout);
   }, []);
 
   const activeFilters = [
@@ -127,7 +157,7 @@ export default function Home() {
   ].filter((filter): filter is string => filter !== null);
   const hasActiveFilters = activeFilters.length > 0;
   const selectedPaperCount = selectedPaperIds.length;
-  const canAnalyzeSelectedPapers = canAnalyzeSelection(selectedPaperIds);
+  const canCompareSelectedPapers = canAnalyzeSelection(selectedPaperIds);
 
   function clearFilters() {
     setFromYear("");
@@ -162,40 +192,40 @@ export default function Home() {
     setSelectedPaperIds((currentSelection) =>
       togglePaperSelection(currentSelection, openAlexId),
     );
-    setBatchAnalysis(null);
-    setBatchError(null);
+    setBatchComparison(null);
+    setBatchComparisonError(null);
   }
 
   function clearBatchState() {
     setSelectedPaperIds([]);
-    setBatchAnalysis(null);
-    setBatchError(null);
+    setBatchComparison(null);
+    setBatchComparisonError(null);
   }
 
-  async function handleBatchAnalysis() {
+  async function handleBatchComparison() {
     if (
       requestInProgress.current ||
-      !canAnalyzeSelectedPapers ||
+      !canCompareSelectedPapers ||
       !claimBatchRequest(batchRequestInProgress)
     ) {
       return;
     }
 
-    setIsBatchAnalyzing(true);
-    setBatchError(null);
-    setBatchAnalysis(null);
+    setIsBatchComparing(true);
+    setBatchComparisonError(null);
+    setBatchComparison(null);
 
     try {
-      const response = await requestBatchScientificAnalysis(selectedPaperIds);
-      setBatchAnalysis(response);
+      const response = await requestBatchComparison(selectedPaperIds);
+      setBatchComparison(response);
     } catch (requestError) {
       console.error(requestError);
-      setBatchError(
-        "No fue posible completar el análisis de las publicaciones seleccionadas. Intenta nuevamente en unos momentos.",
+      setBatchComparisonError(
+        "No fue posible comparar las publicaciones seleccionadas. Intenta nuevamente en unos momentos.",
       );
     } finally {
       releaseBatchRequest(batchRequestInProgress);
-      setIsBatchAnalyzing(false);
+      setIsBatchComparing(false);
     }
   }
 
@@ -298,6 +328,8 @@ export default function Home() {
           </p>
         </header>
 
+        <DocumentUpload />
+
         <form
           className="rounded-2xl border border-cocid-graphite bg-cocid-white p-5"
           onSubmit={handleSubmit}
@@ -322,7 +354,7 @@ export default function Home() {
             />
             <button
               className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-6 py-3 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
-              disabled={isLoading || isBatchAnalyzing}
+              disabled={isLoading || isBatchComparing}
               type="submit"
             >
               {isLoading && (
@@ -340,7 +372,7 @@ export default function Home() {
 
           <fieldset
             className="mt-5 border-t border-cocid-graphite pt-5"
-            disabled={isLoading || isBatchAnalyzing}
+            disabled={isLoading || isBatchComparing}
           >
             <legend className="px-2 text-sm font-semibold text-cocid-navy">
               Filtros opcionales
@@ -413,7 +445,10 @@ export default function Home() {
             <div className="mt-4 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
               <button
                 className="rounded-lg border border-cocid-tech-blue bg-cocid-white px-3 py-2 text-sm font-semibold text-cocid-tech-blue transition hover:bg-cocid-tech-blue hover:text-cocid-white focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:border-cocid-graphite disabled:bg-cocid-white disabled:text-cocid-graphite"
-                disabled={!hasActiveFilters || isLoading || isBatchAnalyzing}
+                disabled={
+                  hasMounted &&
+                  (!hasActiveFilters || isLoading || isBatchComparing)
+                }
                 onClick={clearFilters}
                 type="button"
               >
@@ -448,7 +483,7 @@ export default function Home() {
           </fieldset>
         </form>
 
-        <section aria-busy={isLoading || isBatchAnalyzing}>
+        <section aria-busy={isLoading || isBatchComparing}>
           {error && (
             <p
               className="rounded-xl border border-cocid-gold bg-cocid-white p-4 text-cocid-graphite"
@@ -509,35 +544,35 @@ export default function Home() {
                 <button
                   className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-5 py-2 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
                   disabled={
-                    !canAnalyzeSelectedPapers ||
-                    isBatchAnalyzing ||
+                    !canCompareSelectedPapers ||
+                    isBatchComparing ||
                     isLoading
                   }
-                  onClick={() => void handleBatchAnalysis()}
+                  onClick={() => void handleBatchComparison()}
                   type="button"
                 >
-                  {isBatchAnalyzing && (
+                  {isBatchComparing && (
                     <span
                       aria-hidden="true"
                       className="h-4 w-4 animate-spin rounded-full border-2 border-cocid-white border-t-cocid-navy"
                     />
                   )}
-                  {isBatchAnalyzing
-                    ? "Analizando seleccionados..."
-                    : "Analizar seleccionados"}
+                  {isBatchComparing
+                    ? "Comparando publicaciones..."
+                    : "Comparar publicaciones"}
                 </button>
               </div>
 
-              {batchError && (
+              {batchComparisonError && (
                 <p
                   className="rounded-xl border border-cocid-gold bg-cocid-white p-4 text-cocid-graphite"
                   role="alert"
                 >
-                  {batchError}
+                  {batchComparisonError}
                 </p>
               )}
 
-              {isBatchAnalyzing && (
+              {isBatchComparing && (
                 <div
                   className="flex items-center gap-3 rounded-xl border border-cocid-tech-blue bg-cocid-white p-4 text-cocid-navy"
                   role="status"
@@ -547,14 +582,18 @@ export default function Home() {
                     className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-cocid-graphite border-t-cocid-tech-blue"
                   />
                   <p>
-                    Analizando {selectedPaperCount} publicaciones... Este proceso
-                    puede tardar varios segundos.
+                    Comparando publicaciones... Se están procesando{" "}
+                    {selectedPaperCount} publicaciones y este proceso puede
+                    tardar varios segundos.
                   </p>
                 </div>
               )}
 
-              {batchAnalysis && (
-                <BatchAnalysisResults response={batchAnalysis} papers={papers} />
+              {batchComparison && (
+                <BatchComparisonResults
+                  response={batchComparison}
+                  papers={papers}
+                />
               )}
 
               <ul className="space-y-4">
@@ -570,7 +609,7 @@ export default function Home() {
                     ? selectedPaperIds.includes(selectableOpenAlexId)
                     : false;
                   const isPaperSelectionDisabled =
-                    isBatchAnalyzing ||
+                    isBatchComparing ||
                     (!isPaperSelected &&
                       selectedPaperCount >= MAX_BATCH_SELECTION);
 

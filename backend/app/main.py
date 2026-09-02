@@ -1,7 +1,8 @@
 from typing import Annotated, Literal
+from uuid import UUID
 
 import requests
-from fastapi import FastAPI, HTTPException, Path, Query
+from fastapi import FastAPI, File, HTTPException, Path, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.analysis import ScientificAnalysisOrchestrator
@@ -16,8 +17,28 @@ from app.schemas import (
     BatchAnalysisRequest,
     BatchAnalysisResponse,
     BatchComparisonResponse,
+    ChunkedDocument,
+    DocumentUploadResponse,
+    ExtractedDocument,
     Paper,
     ScientificAnalysis,
+)
+from app.services.document_storage import (
+    DocumentNotFoundError,
+    DocumentStorageError,
+    DocumentStorageService,
+    DocumentTooLargeError,
+    EmptyDocumentError,
+    InvalidPdfSignatureError,
+    UnsupportedDocumentError,
+)
+from app.services.document_chunking import DocumentChunkingService
+from app.services.pdf_extraction import (
+    MAX_PDF_PAGES,
+    PdfEncryptedError,
+    PdfExtractionError,
+    PdfExtractionService,
+    PdfPageLimitExceededError,
 )
 from app.services.openalex import get_paper_by_id, search_papers
 from app.services.scientific_analysis import (
@@ -55,11 +76,137 @@ batch_comparison_orchestrator = BatchComparisonOrchestrator(
     batch_analysis_service,
     comparison_agent,
 )
+document_storage_service = DocumentStorageService()
+pdf_extraction_service = PdfExtractionService(document_storage_service)
+document_chunking_service = DocumentChunkingService(pdf_extraction_service)
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post(
+    "/documents/upload",
+    response_model=DocumentUploadResponse,
+    status_code=201,
+)
+async def upload_document(
+    file: Annotated[UploadFile, File(description="PDF científico")],
+):
+    try:
+        stored_document = await document_storage_service.save_pdf(file)
+    except EmptyDocumentError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="El archivo PDF está vacío.",
+        ) from error
+    except (UnsupportedDocumentError, InvalidPdfSignatureError) as error:
+        raise HTTPException(
+            status_code=415,
+            detail="El archivo debe ser un PDF válido con MIME application/pdf.",
+        ) from error
+    except DocumentTooLargeError as error:
+        raise HTTPException(
+            status_code=413,
+            detail="El archivo PDF supera el límite permitido de 15 MiB.",
+        ) from error
+    except DocumentStorageError as error:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible almacenar el documento.",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible almacenar el documento.",
+        ) from error
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+
+    return DocumentUploadResponse(
+        document_id=stored_document.document_id,
+        filename=stored_document.public_filename,
+        size_bytes=stored_document.size_bytes,
+        status="uploaded",
+    )
+
+
+@app.post(
+    "/documents/{document_id}/extract",
+    response_model=ExtractedDocument,
+)
+def extract_document(document_id: UUID):
+    try:
+        return pdf_extraction_service.extract(document_id)
+    except DocumentNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="El documento no fue encontrado.",
+        ) from error
+    except PdfPageLimitExceededError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "El documento supera el límite permitido de "
+                f"{MAX_PDF_PAGES} páginas."
+            ),
+        ) from error
+    except PdfEncryptedError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="No es posible procesar un PDF cifrado o protegido con contraseña.",
+        ) from error
+    except PdfExtractionError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="El archivo PDF está corrupto o no tiene una estructura procesable.",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible extraer el contenido del documento.",
+        ) from error
+
+
+@app.post(
+    "/documents/{document_id}/chunks",
+    response_model=ChunkedDocument,
+)
+def chunk_document(document_id: UUID):
+    try:
+        return document_chunking_service.chunk_document(document_id)
+    except DocumentNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="El documento no fue encontrado.",
+        ) from error
+    except PdfPageLimitExceededError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "El documento supera el límite permitido de "
+                f"{MAX_PDF_PAGES} páginas."
+            ),
+        ) from error
+    except PdfEncryptedError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="No es posible procesar un PDF cifrado o protegido con contraseña.",
+        ) from error
+    except PdfExtractionError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="El archivo PDF está corrupto o no tiene una estructura procesable.",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible preparar el contenido del documento.",
+        ) from error
 
 
 @app.get("/papers", response_model=list[Paper])
