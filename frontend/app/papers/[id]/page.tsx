@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 
 import {
   API_BASE_URL,
@@ -16,6 +16,8 @@ import {
   isPaper,
 } from "@/app/lib/papers";
 import type { Paper } from "@/app/lib/papers";
+import { requestScientificAnalysis } from "@/app/lib/scientific-analysis";
+import type { ScientificAnalysis } from "@/app/lib/scientific-analysis";
 
 type PaperDetailPageProps = {
   params: Promise<{ id: string }>;
@@ -28,6 +30,10 @@ export default function PaperDetailPage({ params }: PaperDetailPageProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [analysis, setAnalysis] = useState<ScientificAnalysis | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const analysisRequestInProgress = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -35,6 +41,8 @@ export default function PaperDetailPage({ params }: PaperDetailPageProps) {
     async function loadPaper() {
       setIsLoading(true);
       setError(null);
+      setAnalysis(null);
+      setAnalysisError(null);
 
       try {
         const response = await fetch(
@@ -98,6 +106,30 @@ export default function PaperDetailPage({ params }: PaperDetailPageProps) {
     }
 
     router.push("/");
+  }
+
+  async function analyzePaper() {
+    if (!paper || analysisRequestInProgress.current) {
+      return;
+    }
+
+    analysisRequestInProgress.current = true;
+    setIsAnalyzing(true);
+    setAnalysis(null);
+    setAnalysisError(null);
+
+    try {
+      const data = await requestScientificAnalysis(paper.openalex_id ?? id);
+      setAnalysis(data);
+    } catch (requestError) {
+      console.error(requestError);
+      setAnalysisError(
+        "No fue posible analizar la publicación. Intenta nuevamente en unos momentos.",
+      );
+    } finally {
+      analysisRequestInProgress.current = false;
+      setIsAnalyzing(false);
+    }
   }
 
   return (
@@ -236,6 +268,123 @@ export default function PaperDetailPage({ params }: PaperDetailPageProps) {
                   "El abstract no está disponible en OpenAlex.",
                 )}
               </p>
+            </section>
+
+            <section
+              aria-busy={isAnalyzing}
+              className="space-y-4 border-t border-cocid-graphite pt-6"
+            >
+              <div className="space-y-2">
+                <h2 className="text-xl font-semibold text-cocid-navy">
+                  Análisis mediante inteligencia artificial
+                </h2>
+                <p className="text-sm leading-6 text-cocid-graphite">
+                  Genera un análisis estructurado utilizando únicamente la
+                  información disponible de esta publicación.
+                </p>
+              </div>
+
+              <button
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cocid-tech-blue px-4 py-2 text-sm font-semibold text-cocid-white hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite sm:w-auto"
+                disabled={isAnalyzing}
+                onClick={analyzePaper}
+                type="button"
+              >
+                {isAnalyzing && (
+                  <span
+                    aria-hidden="true"
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-cocid-white border-t-cocid-turquoise"
+                  />
+                )}
+                {isAnalyzing ? "Analizando..." : "Analizar con IA"}
+              </button>
+
+              {isAnalyzing && (
+                <div
+                  className="flex items-center gap-3 rounded-xl border border-cocid-tech-blue bg-cocid-white p-4 text-cocid-navy"
+                  role="status"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-cocid-graphite border-t-cocid-turquoise"
+                  />
+                  <p>Analizando publicación...</p>
+                </div>
+              )}
+
+              {!isAnalyzing && analysisError && (
+                <div
+                  className="rounded-xl border border-cocid-gold bg-cocid-white p-4 text-cocid-graphite"
+                  role="alert"
+                >
+                  <p>{analysisError}</p>
+                  <p className="mt-1 text-sm">
+                    Puedes volver a intentarlo con el botón de análisis.
+                  </p>
+                </div>
+              )}
+
+              {!isAnalyzing && analysis && (
+                <div
+                  className="space-y-6 rounded-xl border border-cocid-turquoise bg-cocid-white p-5 sm:p-6"
+                  aria-live="polite"
+                >
+                  <dl className="space-y-5">
+                    <div>
+                      <dt className="font-semibold text-cocid-navy">
+                        Objetivo
+                      </dt>
+                      <dd className="mt-1 whitespace-pre-line break-words leading-7 text-cocid-graphite">
+                        {analysis.objective}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="font-semibold text-cocid-navy">
+                        Metodología
+                      </dt>
+                      <dd className="mt-1 whitespace-pre-line break-words leading-7 text-cocid-graphite">
+                        {analysis.methodology}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="font-semibold text-cocid-navy">
+                        Resultados
+                      </dt>
+                      <dd className="mt-1 whitespace-pre-line break-words leading-7 text-cocid-graphite">
+                        {analysis.results}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="font-semibold text-cocid-navy">
+                        Conclusiones
+                      </dt>
+                      <dd className="mt-1 whitespace-pre-line break-words leading-7 text-cocid-graphite">
+                        {analysis.conclusions}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <div className="space-y-2">
+                    <h3 className="font-semibold text-cocid-navy">
+                      Hallazgos principales
+                    </h3>
+                    {analysis.findings.length > 0 ? (
+                      <ul className="list-disc space-y-2 pl-5 text-cocid-graphite marker:text-cocid-turquoise">
+                        {analysis.findings.map((finding, index) => (
+                          <li className="break-words leading-7" key={index}>
+                            {finding}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-cocid-graphite">
+                        No se identificaron hallazgos con la información
+                        disponible.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </section>
 
             <section className="space-y-3">

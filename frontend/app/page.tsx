@@ -4,6 +4,19 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
+import { BatchAnalysisResults } from "@/app/components/batch-analysis-results";
+import {
+  requestBatchScientificAnalysis,
+  type BatchAnalysisResponse,
+} from "@/app/lib/batch-analysis";
+import {
+  MAX_BATCH_SELECTION,
+  canAnalyzeSelection,
+  claimBatchRequest,
+  isSelectableOpenAlexId,
+  releaseBatchRequest,
+  togglePaperSelection,
+} from "@/app/lib/batch-selection";
 import {
   API_BASE_URL,
   PAPER_SEARCH_STORAGE_KEY,
@@ -33,7 +46,13 @@ export default function Home() {
   const [publicationType, setPublicationType] =
     useState<PublicationTypeFilter>("");
   const [openAccess, setOpenAccess] = useState<OpenAccessFilter>("");
+  const [selectedPaperIds, setSelectedPaperIds] = useState<string[]>([]);
+  const [batchAnalysis, setBatchAnalysis] =
+    useState<BatchAnalysisResponse | null>(null);
+  const [isBatchAnalyzing, setIsBatchAnalyzing] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
   const requestInProgress = useRef(false);
+  const batchRequestInProgress = useRef(false);
 
   useEffect(() => {
     try {
@@ -107,6 +126,8 @@ export default function Home() {
         : null,
   ].filter((filter): filter is string => filter !== null);
   const hasActiveFilters = activeFilters.length > 0;
+  const selectedPaperCount = selectedPaperIds.length;
+  const canAnalyzeSelectedPapers = canAnalyzeSelection(selectedPaperIds);
 
   function clearFilters() {
     setFromYear("");
@@ -133,10 +154,55 @@ export default function Home() {
     }
   }
 
+  function handlePaperSelection(openAlexId: string) {
+    if (batchRequestInProgress.current) {
+      return;
+    }
+
+    setSelectedPaperIds((currentSelection) =>
+      togglePaperSelection(currentSelection, openAlexId),
+    );
+    setBatchAnalysis(null);
+    setBatchError(null);
+  }
+
+  function clearBatchState() {
+    setSelectedPaperIds([]);
+    setBatchAnalysis(null);
+    setBatchError(null);
+  }
+
+  async function handleBatchAnalysis() {
+    if (
+      requestInProgress.current ||
+      !canAnalyzeSelectedPapers ||
+      !claimBatchRequest(batchRequestInProgress)
+    ) {
+      return;
+    }
+
+    setIsBatchAnalyzing(true);
+    setBatchError(null);
+    setBatchAnalysis(null);
+
+    try {
+      const response = await requestBatchScientificAnalysis(selectedPaperIds);
+      setBatchAnalysis(response);
+    } catch (requestError) {
+      console.error(requestError);
+      setBatchError(
+        "No fue posible completar el análisis de las publicaciones seleccionadas. Intenta nuevamente en unos momentos.",
+      );
+    } finally {
+      releaseBatchRequest(batchRequestInProgress);
+      setIsBatchAnalyzing(false);
+    }
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (requestInProgress.current) {
+    if (requestInProgress.current || batchRequestInProgress.current) {
       return;
     }
 
@@ -146,6 +212,7 @@ export default function Home() {
       setError("Escribe un tema antes de buscar.");
       setPapers([]);
       setHasSearched(false);
+      clearBatchState();
       return;
     }
 
@@ -153,6 +220,7 @@ export default function Home() {
       setError("El año inicial no puede ser mayor que el año final.");
       setPapers([]);
       setHasSearched(false);
+      clearBatchState();
       return;
     }
 
@@ -161,6 +229,7 @@ export default function Home() {
     setError(null);
     setPapers([]);
     setHasSearched(true);
+    clearBatchState();
 
     const params = new URLSearchParams({
       query: normalizedQuery,
@@ -253,7 +322,7 @@ export default function Home() {
             />
             <button
               className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-6 py-3 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
-              disabled={isLoading}
+              disabled={isLoading || isBatchAnalyzing}
               type="submit"
             >
               {isLoading && (
@@ -271,7 +340,7 @@ export default function Home() {
 
           <fieldset
             className="mt-5 border-t border-cocid-graphite pt-5"
-            disabled={isLoading}
+            disabled={isLoading || isBatchAnalyzing}
           >
             <legend className="px-2 text-sm font-semibold text-cocid-navy">
               Filtros opcionales
@@ -344,7 +413,7 @@ export default function Home() {
             <div className="mt-4 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
               <button
                 className="rounded-lg border border-cocid-tech-blue bg-cocid-white px-3 py-2 text-sm font-semibold text-cocid-tech-blue transition hover:bg-cocid-tech-blue hover:text-cocid-white focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:border-cocid-graphite disabled:bg-cocid-white disabled:text-cocid-graphite"
-                disabled={!hasActiveFilters || isLoading}
+                disabled={!hasActiveFilters || isLoading || isBatchAnalyzing}
                 onClick={clearFilters}
                 type="button"
               >
@@ -379,7 +448,7 @@ export default function Home() {
           </fieldset>
         </form>
 
-        <section aria-busy={isLoading} aria-live="polite">
+        <section aria-busy={isLoading || isBatchAnalyzing}>
           {error && (
             <p
               className="rounded-xl border border-cocid-gold bg-cocid-white p-4 text-cocid-graphite"
@@ -418,10 +487,92 @@ export default function Home() {
               <h2 className="text-xl font-semibold">
                 Resultados ({papers.length})
               </h2>
+
+              <div className="flex flex-col gap-4 rounded-2xl border border-cocid-graphite bg-cocid-white p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="space-y-1">
+                  <p
+                    aria-live="polite"
+                    className="font-semibold text-cocid-navy"
+                  >
+                    {selectedPaperCount}{" "}
+                    {selectedPaperCount === 1
+                      ? "publicación seleccionada"
+                      : "publicaciones seleccionadas"}
+                  </p>
+                  <p
+                    className="text-sm text-cocid-graphite"
+                    id="batch-selection-help"
+                  >
+                    Selecciona entre 2 y {MAX_BATCH_SELECTION} publicaciones.
+                  </p>
+                </div>
+                <button
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-5 py-2 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
+                  disabled={
+                    !canAnalyzeSelectedPapers ||
+                    isBatchAnalyzing ||
+                    isLoading
+                  }
+                  onClick={() => void handleBatchAnalysis()}
+                  type="button"
+                >
+                  {isBatchAnalyzing && (
+                    <span
+                      aria-hidden="true"
+                      className="h-4 w-4 animate-spin rounded-full border-2 border-cocid-white border-t-cocid-navy"
+                    />
+                  )}
+                  {isBatchAnalyzing
+                    ? "Analizando seleccionados..."
+                    : "Analizar seleccionados"}
+                </button>
+              </div>
+
+              {batchError && (
+                <p
+                  className="rounded-xl border border-cocid-gold bg-cocid-white p-4 text-cocid-graphite"
+                  role="alert"
+                >
+                  {batchError}
+                </p>
+              )}
+
+              {isBatchAnalyzing && (
+                <div
+                  className="flex items-center gap-3 rounded-xl border border-cocid-tech-blue bg-cocid-white p-4 text-cocid-navy"
+                  role="status"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-cocid-graphite border-t-cocid-tech-blue"
+                  />
+                  <p>
+                    Analizando {selectedPaperCount} publicaciones... Este proceso
+                    puede tardar varios segundos.
+                  </p>
+                </div>
+              )}
+
+              {batchAnalysis && (
+                <BatchAnalysisResults response={batchAnalysis} papers={papers} />
+              )}
+
               <ul className="space-y-4">
                 {papers.map((paper, index) => {
                   const openAccessLabel = getOpenAccessLabel(paper);
                   const doiUrl = getSafeExternalUrl(paper.doi);
+                  const selectableOpenAlexId = isSelectableOpenAlexId(
+                    paper.openalex_id,
+                  )
+                    ? paper.openalex_id
+                    : null;
+                  const isPaperSelected = selectableOpenAlexId
+                    ? selectedPaperIds.includes(selectableOpenAlexId)
+                    : false;
+                  const isPaperSelectionDisabled =
+                    isBatchAnalyzing ||
+                    (!isPaperSelected &&
+                      selectedPaperCount >= MAX_BATCH_SELECTION);
 
                   return (
                     <li
@@ -429,6 +580,43 @@ export default function Home() {
                       key={paper.id ?? paper.doi ?? `${paper.title}-${index}`}
                     >
                       <article className="space-y-3">
+                        {selectableOpenAlexId && (
+                          <label
+                            className={`inline-flex w-fit items-center gap-2 text-sm font-semibold text-cocid-tech-blue ${
+                              isPaperSelectionDisabled
+                                ? "cursor-not-allowed"
+                                : "cursor-pointer"
+                            }`}
+                          >
+                            <span className="relative h-5 w-5 shrink-0">
+                              <input
+                                aria-describedby="batch-selection-help"
+                                aria-label={`Seleccionar ${displayValue(
+                                  paper.title,
+                                  "publicación sin título",
+                                )}`}
+                                checked={isPaperSelected}
+                                className="peer h-5 w-5 appearance-none rounded border-2 border-cocid-graphite bg-cocid-white focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue checked:border-cocid-tech-blue checked:bg-cocid-tech-blue disabled:border-cocid-graphite disabled:bg-cocid-white"
+                                disabled={isPaperSelectionDisabled}
+                                onChange={() =>
+                                  handlePaperSelection(selectableOpenAlexId)
+                                }
+                                type="checkbox"
+                              />
+                              <span
+                                aria-hidden="true"
+                                className="pointer-events-none absolute inset-0 hidden items-center justify-center text-xs font-bold text-cocid-white peer-checked:flex"
+                              >
+                                ✓
+                              </span>
+                            </span>
+                            <span>
+                              {isPaperSelected
+                                ? "Publicación seleccionada"
+                                : "Seleccionar publicación"}
+                            </span>
+                          </label>
+                        )}
                         <div className="flex flex-col items-start gap-2 sm:flex-row sm:justify-between">
                           <h3 className="min-w-0 break-words text-xl font-semibold leading-7 text-cocid-navy">
                             {displayValue(paper.title, "Título no disponible")}

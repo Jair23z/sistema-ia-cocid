@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "isolatedModules": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "noEmit": false,
+    "outDir": ".test-build/ui",
+    "rootDir": "app",
+    "target": "ES2022"
+  },
+  "include": [
+    "app/page.tsx",
+    "app/components/batch-analysis-results.tsx",
+    "app/lib/**/*.ts"
+  ]
+}
