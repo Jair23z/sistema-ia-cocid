@@ -158,6 +158,143 @@ class ChunkedDocument(BaseModel):
         return self
 
 
+SemanticQuery = Annotated[str, Field(min_length=1, max_length=1000)]
+
+
+class SemanticSearchRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    query: SemanticQuery
+    top_k: Annotated[int, Field(ge=1, le=8)] = 4
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, query: str) -> str:
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("The semantic-search query cannot be empty.")
+        return normalized_query
+
+
+class RetrievedChunk(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    document_id: UUID
+    chunk_index: Annotated[int, Field(ge=1)]
+    page_start: Annotated[int, Field(ge=1)]
+    page_end: Annotated[int, Field(ge=1)]
+    text: Annotated[str, Field(min_length=1)]
+    score: Annotated[float, Field(ge=-1.0, le=1.0, allow_inf_nan=False)]
+
+    @model_validator(mode="after")
+    def validate_page_range(self) -> Self:
+        if self.page_end < self.page_start:
+            raise ValueError("Retrieved chunk page range is invalid.")
+        return self
+
+
+class SemanticSearchResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    document_id: UUID
+    query: SemanticQuery
+    result_count: Annotated[int, Field(ge=0, le=8)]
+    results: list[RetrievedChunk] = Field(max_length=8)
+    status: Literal["completed"]
+
+    @model_validator(mode="after")
+    def validate_results(self) -> Self:
+        if self.result_count != len(self.results):
+            raise ValueError("Semantic-search result count does not match results.")
+        if any(result.document_id != self.document_id for result in self.results):
+            raise ValueError("Every result must belong to the searched document.")
+        return self
+
+
+EvidenceStatus = Literal["sufficient", "partial", "insufficient"]
+INSUFFICIENT_DOCUMENT_EVIDENCE_MESSAGE = (
+    "No existe evidencia suficiente en los fragmentos recuperados para "
+    "responder esta pregunta."
+)
+
+
+class DocumentQuestionRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    query: SemanticQuery
+    top_k: Annotated[int, Field(ge=1, le=8)] = 4
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, query: str) -> str:
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("The document question cannot be empty.")
+        return normalized_query
+
+
+class DocumentCitation(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    chunk_index: Annotated[int, Field(ge=1)]
+    page_start: Annotated[int, Field(ge=1)]
+    page_end: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def validate_page_range(self) -> Self:
+        if self.page_end < self.page_start:
+            raise ValueError("Document citation page range is invalid.")
+        return self
+
+
+class DocumentAnswerResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+    )
+
+    document_id: UUID
+    query: SemanticQuery
+    answer: Annotated[str, Field(min_length=1, max_length=6000)]
+    evidence_status: EvidenceStatus
+    citations: list[DocumentCitation] = Field(max_length=8)
+    status: Literal["completed"]
+
+    @model_validator(mode="after")
+    def validate_evidence_state(self) -> Self:
+        citation_keys = [
+            (citation.chunk_index, citation.page_start, citation.page_end)
+            for citation in self.citations
+        ]
+        if len(citation_keys) != len(set(citation_keys)):
+            raise ValueError("Document citations cannot be duplicated.")
+
+        if self.evidence_status == "insufficient":
+            if self.citations:
+                raise ValueError("Insufficient evidence cannot include citations.")
+            if self.answer != INSUFFICIENT_DOCUMENT_EVIDENCE_MESSAGE:
+                raise ValueError("Insufficient evidence must use the safe response.")
+        elif not self.citations:
+            raise ValueError("Supported document answers require citations.")
+        return self
+
+
 NonEmptyFinding = Annotated[str, Field(min_length=1, max_length=1000)]
 
 

@@ -18,10 +18,14 @@ from app.schemas import (
     BatchAnalysisResponse,
     BatchComparisonResponse,
     ChunkedDocument,
+    DocumentAnswerResponse,
+    DocumentQuestionRequest,
     DocumentUploadResponse,
     ExtractedDocument,
     Paper,
     ScientificAnalysis,
+    SemanticSearchRequest,
+    SemanticSearchResponse,
 )
 from app.services.document_storage import (
     DocumentNotFoundError,
@@ -33,6 +37,25 @@ from app.services.document_storage import (
     UnsupportedDocumentError,
 )
 from app.services.document_chunking import DocumentChunkingService
+from app.services.document_rag import (
+    DocumentRagService,
+    RagAuthenticationError,
+    RagConfigurationError,
+    RagInvalidResponseError,
+    RagProviderError,
+    RagRateLimitError,
+    RagTimeoutError,
+)
+from app.services.embeddings import (
+    EmbeddingAuthenticationError,
+    EmbeddingConfigurationError,
+    EmbeddingDataIntegrityError,
+    EmbeddingInvalidResponseError,
+    EmbeddingProviderError,
+    EmbeddingRateLimitError,
+    EmbeddingService,
+    EmbeddingTimeoutError,
+)
 from app.services.pdf_extraction import (
     MAX_PDF_PAGES,
     PdfEncryptedError,
@@ -49,6 +72,10 @@ from app.services.scientific_analysis import (
     AnalysisRateLimitError,
     AnalysisTimeoutError,
     ScientificAnalysisLLMService,
+)
+from app.services.semantic_retrieval import (
+    InsufficientDocumentTextError,
+    SemanticRetrievalService,
 )
 
 app = FastAPI(
@@ -79,6 +106,12 @@ batch_comparison_orchestrator = BatchComparisonOrchestrator(
 document_storage_service = DocumentStorageService()
 pdf_extraction_service = PdfExtractionService(document_storage_service)
 document_chunking_service = DocumentChunkingService(pdf_extraction_service)
+embedding_service = EmbeddingService()
+semantic_retrieval_service = SemanticRetrievalService(
+    document_chunking_service,
+    embedding_service,
+)
+document_rag_service = DocumentRagService(semantic_retrieval_service)
 
 
 @app.get("/health")
@@ -206,6 +239,195 @@ def chunk_document(document_id: UUID):
         raise HTTPException(
             status_code=500,
             detail="No fue posible preparar el contenido del documento.",
+        ) from error
+
+
+@app.post(
+    "/documents/{document_id}/search",
+    response_model=SemanticSearchResponse,
+)
+def search_document(
+    document_id: UUID,
+    request: SemanticSearchRequest,
+):
+    try:
+        return semantic_retrieval_service.search_document(
+            document_id,
+            request,
+        ).response
+    except DocumentNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="El documento no fue encontrado.",
+        ) from error
+    except PdfPageLimitExceededError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "El documento supera el límite permitido de "
+                f"{MAX_PDF_PAGES} páginas."
+            ),
+        ) from error
+    except PdfEncryptedError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="No es posible procesar un PDF cifrado o protegido con contraseña.",
+        ) from error
+    except PdfExtractionError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="El archivo PDF está corrupto o no tiene una estructura procesable.",
+        ) from error
+    except InsufficientDocumentTextError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "El documento no contiene suficiente texto extraíble para "
+                "realizar una búsqueda semántica."
+            ),
+        ) from error
+    except EmbeddingConfigurationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="El servicio de búsqueda semántica no está configurado.",
+        ) from error
+    except EmbeddingAuthenticationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="No fue posible autenticar el servicio de búsqueda semántica.",
+        ) from error
+    except EmbeddingTimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail="La búsqueda semántica tardó demasiado en responder.",
+        ) from error
+    except EmbeddingRateLimitError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="El servicio de búsqueda semántica alcanzó temporalmente su límite.",
+        ) from error
+    except (EmbeddingInvalidResponseError, EmbeddingDataIntegrityError, ValueError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="El servicio de búsqueda semántica devolvió una respuesta no válida.",
+        ) from error
+    except EmbeddingProviderError as error:
+        raise HTTPException(
+            status_code=502,
+            detail="No fue posible completar la búsqueda semántica.",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible buscar dentro del documento.",
+        ) from error
+
+
+@app.post(
+    "/documents/{document_id}/ask",
+    response_model=DocumentAnswerResponse,
+)
+def ask_document(
+    document_id: UUID,
+    request: DocumentQuestionRequest,
+):
+    try:
+        return document_rag_service.ask_document(document_id, request).response
+    except DocumentNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="El documento no fue encontrado.",
+        ) from error
+    except PdfPageLimitExceededError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "El documento supera el límite permitido de "
+                f"{MAX_PDF_PAGES} páginas."
+            ),
+        ) from error
+    except PdfEncryptedError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="No es posible procesar un PDF cifrado o protegido con contraseña.",
+        ) from error
+    except PdfExtractionError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="El archivo PDF está corrupto o no tiene una estructura procesable.",
+        ) from error
+    except InsufficientDocumentTextError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "El documento no contiene suficiente texto extraíble para "
+                "responder preguntas."
+            ),
+        ) from error
+    except EmbeddingConfigurationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="El servicio de búsqueda semántica no está configurado.",
+        ) from error
+    except EmbeddingAuthenticationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="No fue posible autenticar el servicio de búsqueda semántica.",
+        ) from error
+    except EmbeddingTimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail="La búsqueda semántica tardó demasiado en responder.",
+        ) from error
+    except EmbeddingRateLimitError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="El servicio de búsqueda semántica alcanzó temporalmente su límite.",
+        ) from error
+    except (EmbeddingInvalidResponseError, EmbeddingDataIntegrityError, ValueError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="El servicio de búsqueda semántica devolvió una respuesta no válida.",
+        ) from error
+    except EmbeddingProviderError as error:
+        raise HTTPException(
+            status_code=502,
+            detail="No fue posible completar la búsqueda semántica.",
+        ) from error
+    except RagConfigurationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="El servicio de consulta documental no está configurado.",
+        ) from error
+    except RagAuthenticationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="No fue posible autenticar el servicio de consulta documental.",
+        ) from error
+    except RagTimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail="La consulta documental tardó demasiado en responder.",
+        ) from error
+    except RagRateLimitError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="El servicio de consulta documental alcanzó temporalmente su límite.",
+        ) from error
+    except RagInvalidResponseError as error:
+        raise HTTPException(
+            status_code=502,
+            detail="El servicio de consulta documental devolvió una respuesta no válida.",
+        ) from error
+    except RagProviderError as error:
+        raise HTTPException(
+            status_code=502,
+            detail="No fue posible completar la consulta documental.",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="No fue posible responder la pregunta sobre el documento.",
         ) from error
 
 

@@ -8,6 +8,14 @@ import {
   type ChunkedDocument,
 } from "@/app/lib/document-chunking";
 import {
+  askPdfDocument,
+  type DocumentAnswerResponse,
+} from "@/app/lib/document-rag";
+import {
+  searchPdfDocument,
+  type SemanticSearchResponse,
+} from "@/app/lib/document-search";
+import {
   extractPdfDocument,
   type ExtractedDocument,
 } from "@/app/lib/document-extraction";
@@ -29,12 +37,36 @@ export function DocumentUpload() {
   const [chunkingResult, setChunkingResult] =
     useState<ChunkedDocument | null>(null);
   const [isChunking, setIsChunking] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResult, setSearchResult] =
+    useState<SemanticSearchResponse | null>(null);
+  const [isSearchingDocument, setIsSearchingDocument] = useState(false);
+  const [questionQuery, setQuestionQuery] = useState("");
+  const [answerResult, setAnswerResult] =
+    useState<DocumentAnswerResponse | null>(null);
+  const [isAskingDocument, setIsAskingDocument] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [extractionError, setExtractionError] = useState<string | null>(null);
   const [chunkingError, setChunkingError] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [questionError, setQuestionError] = useState<string | null>(null);
   const uploadInProgress = useRef(false);
   const extractionInProgress = useRef(false);
   const chunkingInProgress = useRef(false);
+  const searchInProgress = useRef(false);
+  const questionInProgress = useRef(false);
+
+  function resetDocumentSearch() {
+    setSearchQuery("");
+    setSearchResult(null);
+    setSearchError(null);
+  }
+
+  function resetDocumentQuestion() {
+    setQuestionQuery("");
+    setAnswerResult(null);
+    setQuestionError(null);
+  }
 
   function handleFileSelection(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
@@ -44,6 +76,8 @@ export function DocumentUpload() {
     setExtractionError(null);
     setChunkingResult(null);
     setChunkingError(null);
+    resetDocumentSearch();
+    resetDocumentQuestion();
 
     if (!file) {
       setError(null);
@@ -74,6 +108,8 @@ export function DocumentUpload() {
     setExtractionError(null);
     setChunkingResult(null);
     setChunkingError(null);
+    resetDocumentSearch();
+    resetDocumentQuestion();
 
     try {
       const response = await uploadPdfDocument(selectedFile);
@@ -100,6 +136,8 @@ export function DocumentUpload() {
     setExtractionResult(null);
     setChunkingResult(null);
     setChunkingError(null);
+    resetDocumentSearch();
+    resetDocumentQuestion();
 
     try {
       const response = await extractPdfDocument(uploadResult.document_id);
@@ -124,6 +162,8 @@ export function DocumentUpload() {
     setIsChunking(true);
     setChunkingError(null);
     setChunkingResult(null);
+    resetDocumentSearch();
+    resetDocumentQuestion();
 
     try {
       const response = await preparePdfDocument(
@@ -138,6 +178,72 @@ export function DocumentUpload() {
     } finally {
       chunkingInProgress.current = false;
       setIsChunking(false);
+    }
+  }
+
+  async function handleDocumentSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalizedQuery = searchQuery.trim();
+    if (
+      searchInProgress.current ||
+      questionInProgress.current ||
+      chunkingResult?.status !== "chunked" ||
+      !normalizedQuery
+    ) {
+      return;
+    }
+
+    searchInProgress.current = true;
+    setIsSearchingDocument(true);
+    setSearchError(null);
+    setSearchResult(null);
+
+    try {
+      const response = await searchPdfDocument(chunkingResult.document_id, {
+        query: normalizedQuery,
+      });
+      setSearchResult(response);
+    } catch (searchRequestError) {
+      console.error(searchRequestError);
+      setSearchError(
+        "No fue posible buscar dentro del documento. Intenta nuevamente.",
+      );
+    } finally {
+      searchInProgress.current = false;
+      setIsSearchingDocument(false);
+    }
+  }
+
+  async function handleDocumentQuestion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalizedQuery = questionQuery.trim();
+    if (
+      questionInProgress.current ||
+      searchInProgress.current ||
+      chunkingResult?.status !== "chunked" ||
+      !normalizedQuery
+    ) {
+      return;
+    }
+
+    questionInProgress.current = true;
+    setIsAskingDocument(true);
+    setQuestionError(null);
+    setAnswerResult(null);
+
+    try {
+      const response = await askPdfDocument(chunkingResult.document_id, {
+        query: normalizedQuery,
+      });
+      setAnswerResult(response);
+    } catch (questionRequestError) {
+      console.error(questionRequestError);
+      setQuestionError(
+        "No fue posible responder la pregunta sobre el documento. Intenta nuevamente.",
+      );
+    } finally {
+      questionInProgress.current = false;
+      setIsAskingDocument(false);
     }
   }
 
@@ -174,7 +280,13 @@ export function DocumentUpload() {
           <input
             accept=".pdf,application/pdf"
             className="mt-2 block w-full rounded-lg border border-cocid-graphite bg-cocid-white px-3 py-2 text-sm text-cocid-graphite file:mr-3 file:rounded-lg file:border-0 file:bg-cocid-tech-blue file:px-3 file:py-2 file:font-semibold file:text-cocid-white focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed"
-            disabled={isUploading || isExtracting || isChunking}
+            disabled={
+              isUploading ||
+              isExtracting ||
+              isChunking ||
+              isSearchingDocument ||
+              isAskingDocument
+            }
             id="scientific-pdf"
             name="scientific-pdf"
             onChange={handleFileSelection}
@@ -206,7 +318,9 @@ export function DocumentUpload() {
             selectionError !== null ||
             isUploading ||
             isExtracting ||
-            isChunking
+            isChunking ||
+            isSearchingDocument ||
+            isAskingDocument
           }
           type="submit"
         >
@@ -242,7 +356,12 @@ export function DocumentUpload() {
           </p>
           <button
             className="mt-4 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-5 py-2 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
-            disabled={isExtracting || isChunking}
+            disabled={
+              isExtracting ||
+              isChunking ||
+              isSearchingDocument ||
+              isAskingDocument
+            }
             onClick={handleExtraction}
             type="button"
           >
@@ -298,7 +417,9 @@ export function DocumentUpload() {
             </dl>
             <button
               className="mt-4 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-5 py-2 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
-              disabled={isChunking}
+              disabled={
+                isChunking || isSearchingDocument || isAskingDocument
+              }
               onClick={handleChunking}
               type="button"
             >
@@ -384,6 +505,244 @@ export function DocumentUpload() {
             </div>
           </dl>
         </div>
+      )}
+
+      {chunkingResult?.status === "chunked" && (
+        <section
+          aria-labelledby="document-search-title"
+          className="mt-4 rounded-xl border border-cocid-gold bg-cocid-white p-4"
+        >
+          <h3
+            className="text-sm font-semibold uppercase tracking-wide text-cocid-navy"
+            id="document-search-title"
+          >
+            Buscar dentro del documento
+          </h3>
+          <p className="mt-1 text-sm text-cocid-graphite">
+            Recupera los fragmentos del PDF más relacionados con tu consulta.
+          </p>
+          <form
+            aria-busy={isSearchingDocument}
+            aria-label="Búsqueda dentro del documento"
+            className="mt-4 flex flex-col gap-3 sm:flex-row"
+            onSubmit={handleDocumentSearch}
+          >
+            <label className="min-w-0 flex-1">
+              <span className="sr-only">Consulta dentro del documento</span>
+              <input
+                className="w-full rounded-xl border border-cocid-graphite bg-cocid-white px-4 py-3 text-cocid-navy outline-none placeholder:text-cocid-graphite focus:border-cocid-tech-blue focus:ring-4 focus:ring-cocid-tech-blue disabled:cursor-not-allowed"
+                disabled={isSearchingDocument || isAskingDocument}
+                maxLength={1000}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="¿Qué metodología utilizó el estudio?"
+                type="search"
+                value={searchQuery}
+              />
+            </label>
+            <button
+              className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-5 py-2 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
+              disabled={
+                isSearchingDocument ||
+                isAskingDocument ||
+                searchQuery.trim().length === 0
+              }
+              type="submit"
+            >
+              {isSearchingDocument && (
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-cocid-white border-t-cocid-navy"
+                />
+              )}
+              {isSearchingDocument
+                ? "Buscando en documento..."
+                : "Buscar en documento"}
+            </button>
+          </form>
+
+          {isSearchingDocument && (
+            <p className="mt-4 text-sm text-cocid-graphite" role="status">
+              Buscando fragmentos relevantes...
+            </p>
+          )}
+
+          {searchError && (
+            <p
+              className="mt-4 rounded-xl border border-cocid-gold bg-cocid-white p-4 text-sm text-cocid-graphite"
+              role="alert"
+            >
+              {searchError}
+            </p>
+          )}
+
+          {searchResult && (
+            <div className="mt-5">
+              <p className="font-semibold text-cocid-navy">
+                {searchResult.result_count}{" "}
+                {searchResult.result_count === 1
+                  ? "fragmento recuperado"
+                  : "fragmentos recuperados"}
+              </p>
+              <ol className="mt-3 space-y-3">
+                {searchResult.results.map((result) => {
+                  const pageLabel =
+                    result.page_start === result.page_end
+                      ? `Página ${result.page_start}`
+                      : `Páginas ${result.page_start}–${result.page_end}`;
+                  const preview =
+                    result.text.length > 360
+                      ? `${result.text.slice(0, 360).trimEnd()}…`
+                      : result.text;
+                  return (
+                    <li
+                      className="rounded-xl border border-cocid-turquoise bg-cocid-white p-4"
+                      key={result.chunk_index}
+                    >
+                      <div className="flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:justify-between">
+                        <span className="font-semibold text-cocid-navy">
+                          {pageLabel}
+                        </span>
+                        <span className="text-cocid-graphite">
+                          Relevancia: {result.score.toFixed(3)}
+                        </span>
+                      </div>
+                      <p className="mt-2 break-words text-sm leading-6 text-cocid-graphite">
+                        {preview}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          )}
+        </section>
+      )}
+
+      {chunkingResult?.status === "chunked" && (
+        <section
+          aria-labelledby="document-question-title"
+          className="mt-4 rounded-xl border border-cocid-turquoise bg-cocid-white p-4"
+        >
+          <h3
+            className="text-sm font-semibold uppercase tracking-wide text-cocid-navy"
+            id="document-question-title"
+          >
+            Preguntar sobre el documento
+          </h3>
+          <p className="mt-1 text-sm text-cocid-graphite">
+            Genera una respuesta basada exclusivamente en los fragmentos
+            recuperados del PDF.
+          </p>
+          <form
+            aria-busy={isAskingDocument}
+            aria-label="Pregunta sobre el documento"
+            className="mt-4 flex flex-col gap-3 sm:flex-row"
+            onSubmit={handleDocumentQuestion}
+          >
+            <label className="min-w-0 flex-1" htmlFor="document-question">
+              <span className="sr-only">Pregunta sobre el documento</span>
+              <input
+                className="w-full rounded-xl border border-cocid-graphite bg-cocid-white px-4 py-3 text-cocid-navy outline-none placeholder:text-cocid-graphite focus:border-cocid-tech-blue focus:ring-4 focus:ring-cocid-tech-blue disabled:cursor-not-allowed"
+                disabled={isAskingDocument || isSearchingDocument}
+                id="document-question"
+                maxLength={1000}
+                onChange={(event) => setQuestionQuery(event.target.value)}
+                placeholder="Escribe una pregunta sobre el documento"
+                type="search"
+                value={questionQuery}
+              />
+            </label>
+            <button
+              className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-cocid-tech-blue px-5 py-2 font-semibold text-cocid-white transition hover:bg-cocid-navy focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cocid-tech-blue disabled:cursor-not-allowed disabled:bg-cocid-graphite"
+              disabled={
+                isAskingDocument ||
+                isSearchingDocument ||
+                questionQuery.trim().length === 0
+              }
+              type="submit"
+            >
+              {isAskingDocument && (
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-cocid-white border-t-cocid-navy"
+                />
+              )}
+              {isAskingDocument
+                ? "Consultando documento..."
+                : "Preguntar al documento"}
+            </button>
+          </form>
+
+          {isAskingDocument && (
+            <p className="mt-4 text-sm text-cocid-graphite" role="status">
+              Consultando documento...
+            </p>
+          )}
+
+          {questionError && (
+            <p
+              className="mt-4 rounded-xl border border-cocid-gold bg-cocid-white p-4 text-sm text-cocid-graphite"
+              role="alert"
+            >
+              {questionError}
+            </p>
+          )}
+
+          {answerResult && (
+            <div className="mt-5 rounded-xl border border-cocid-gold bg-cocid-white p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <h4 className="font-semibold text-cocid-navy">
+                  Respuesta de IA
+                </h4>
+                <span
+                  className={`w-fit rounded-full border px-3 py-1 text-xs font-semibold ${
+                    answerResult.evidence_status === "sufficient"
+                      ? "border-cocid-turquoise text-cocid-turquoise"
+                      : answerResult.evidence_status === "partial"
+                        ? "border-cocid-gold text-cocid-graphite"
+                        : "border-cocid-graphite text-cocid-graphite"
+                  }`}
+                >
+                  {answerResult.evidence_status === "sufficient"
+                    ? "Evidencia suficiente"
+                    : answerResult.evidence_status === "partial"
+                      ? "Evidencia parcial"
+                      : "Evidencia insuficiente"}
+                </span>
+              </div>
+              <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-cocid-graphite">
+                {answerResult.answer}
+              </p>
+
+              {answerResult.citations.length > 0 && (
+                <div className="mt-4 border-t border-cocid-gold pt-3">
+                  <p className="text-sm font-semibold text-cocid-navy">
+                    Fuentes
+                  </p>
+                  <ul className="mt-2 flex flex-wrap gap-2">
+                    {Array.from(
+                      new Map(
+                        answerResult.citations.map((citation) => [
+                          `${citation.page_start}:${citation.page_end}`,
+                          citation,
+                        ]),
+                      ).values(),
+                    ).map((citation) => (
+                      <li
+                        className="rounded-full border border-cocid-turquoise bg-cocid-white px-3 py-1 text-xs font-semibold text-cocid-graphite"
+                        key={`${citation.page_start}:${citation.page_end}`}
+                      >
+                        {citation.page_start === citation.page_end
+                          ? `Página ${citation.page_start}`
+                          : `Páginas ${citation.page_start}–${citation.page_end}`}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
       )}
     </section>
   );
